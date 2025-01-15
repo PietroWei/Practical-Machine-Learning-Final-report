@@ -1,0 +1,194 @@
+
+---
+title: "ciao"
+author: "Pietro Gazzi"
+date: "1/15/2025"
+output: html_document
+---
+The proliferation of affordable wearable technology, including devices like Fitbit, Jawbone Up, and Nike FuelBand, has made it easier to collect extensive data on personal activities. While these devices are often used to track the volume of physical activity, they can also provide valuable insights into the quality and performance of such activities. This project aims to predict the performance of six participants during barbell lifts, using data from accelerometers placed on their belt, forearm, arm, and dumbbell.
+
+For more information about this dataset, please refer to the following source:  
+[Dataset Source](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har)
+
+### Data Sources:
+- **Training data**: [Link to training data](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv).
+- **Test data**: [Link to test data](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv).
+
+
+```{r, echo=FALSE}
+# Load necessary libraries
+library(randomForest)
+library(caret)
+library(dplyr)
+library(ggcorrplot)
+library(reshape2)
+```
+
+## Data Cleaning and Initial Exploration
+To properly evaluate the performance of the model before applying it to the unseen test set, the training dataset (train_set) is split into two parts: an 80% training subset and a 20% validation subset. This split allows us to fine-tune the model using the training data while assessing its ability to generalize to new, unseen data using the validation set. By doing this, we ensure that our model is not overfitting to the training data and that its performance on the validation set provides a more accurate estimate of how it will perform on the test set.
+
+```{r, echo=FALSE}
+train_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+test_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+# Download and read in the training and test datasets
+train_set_all <- read.csv(train_url, na.strings = c("NA", ""))
+test_set <- read.csv(test_url, na.strings = c("NA", ""))
+
+set.seed(123)  # For reproducibility
+train_index <- createDataPartition(train_set_all$classe, p = 0.8, list = FALSE)
+
+# Create training and validation subsets
+train_set <- train_set_all[train_index, ]
+validation_set <- train_set_all[-train_index, ]
+```
+
+In this cleaning process, we reduce the number of variables from 160 to 53 by applying several steps. First, we remove columns that have the same value for all rows, as these do not provide any variability or meaningful information. Next, we eliminate columns with more than 50% missing values, ensuring the dataset remains informative and reducing noise. Finally, we discard irrelevant columns, such as timestamps and window identifiers, that are not useful for predicting the target variable, "classe." These steps help retain only the most relevant and reliable features for model building, resulting in a more manageable and focused dataset.
+
+```{r, echo=FALSE}
+# Rimuovere colonne con lo stesso valore per tutte le righe (variabili costanti)
+train_set <- train_set[, sapply(train_set, function(x) length(unique(x)) > 1)]
+
+# Rimuovere colonne con troppi valori mancanti (ad esempio più del 50%)
+train_set <- train_set[, colSums(is.na(train_set)) <= 0.5 * nrow(train_set)]
+
+# Remove irrelevant columns (e.g., timestamps)
+train_set <- train_set %>%
+  select(-X, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp, -new_window, -num_window)
+
+# Ensure 'classe' is a factor variable
+train_set$classe <- as.factor(train_set$classe)
+```
+
+This plot illustrates the distribution of the target variable classe across different users (user_name) within the training set. Each point, jittered for clarity, represents an observation, with colors distinguishing the various classes. Count labels for each combination of user_name and classe provide a clear view of the data's density and spread. The visualization confirms that the training data is well-balanced, with observations evenly distributed among classes and users, ensuring a robust foundation for model training and evaluation.
+
+```{r, echo=FALSE}
+# Calculate counts for each combination of user_name and classe
+count_data <- train_set %>%
+  count(user_name, classe)
+
+# Jitter plot with counters
+ggplot(train_set, aes(x = user_name, y = classe)) +
+  geom_jitter(aes(color = classe), width = 0.2, height = 0.2, alpha = 0.6) +
+  geom_text(
+    data = count_data,
+    aes(label = n),  # Add the count as text
+    color = "black",
+    size = 3,
+    position = position_jitter(width = 0.3, height = 0.3)
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Class Distribution per User with Count",
+    x = "User Name",
+    y = "Class",
+    color = "Class"
+  )
+```
+
+Before analyzing the correlation heatmap, it's important to understand the relationships between the numerical variables and the target variable, "classe." This helps identify redundant variables and those most likely to contribute to the model. The heatmap below visualizes these correlations, allowing us to select relevant features and reduce multicollinearity.
+
+```{r, echo=FALSE}
+# Select numerical variables and calculate correlation matrix
+num_data <- train_set[, sapply(train_set, is.numeric)]
+cor_matrix <- cor(num_data, use = "complete.obs")
+
+# Plot the heatmap without numbers and with numeric axes
+ggcorrplot(cor_matrix, 
+           lab = FALSE,  # Remove numbers from the plot
+           colors = c("blue", "white", "red"), 
+           title = "Correlation Heatmap of Numeric Variables") +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),  # Rotate axis labels
+    axis.text.y =  element_text(angle = 0, hjust = 1, vjust = 0.5) 
+  ) +
+  scale_x_discrete(labels = seq_along(colnames(cor_matrix))) +  # Use numeric labels for x-axis
+  scale_y_discrete(labels = seq_along(colnames(cor_matrix)))  # Use numeric labels for y-axis
+```
+
+After cleaning the dataset, several steps were taken to reduce the number of variables. First, highly correlated variables (with a correlation above 0.9) were removed to prevent multicollinearity and improve model stability. Additionally, some redundant or irrelevant variables were discarded. As a result, the number of variables was reduced from 53 to 45, ensuring that only the most informative and independent features remain for model building. This process helps enhance the model's performance and interpretability.
+
+```{r, echo=FALSE}
+# Calculate the correlation matrix
+cor_matrix <- cor(train_set[, sapply(train_set, is.numeric)], use = "complete.obs")
+
+# Set correlation threshold (e.g., 0.9)
+threshold <- 0.9
+
+# Find the upper triangle of the correlation matrix, excluding the diagonal
+upper_tri <- upper.tri(cor_matrix)
+
+# Identify highly correlated pairs
+highly_correlated <- which(upper_tri & abs(cor_matrix) > threshold, arr.ind = TRUE)
+
+# Get the names of the variables to be removed
+vars_to_remove <- unique(colnames(cor_matrix)[highly_correlated[, 2]])
+
+# Remove highly correlated variables from the dataset
+train_set_cleaned <- train_set[, !(colnames(train_set) %in% vars_to_remove)]
+```
+
+## Model preparation and results
+To ensure a robust evaluation of the model's performance, we employed 5-fold cross-validation during the training process. This technique splits the dataset into five parts, using four folds for training and one for testing in each iteration, rotating through all the folds. This approach helps assess how well the model generalizes to unseen data and minimizes the risk of overfitting.
+
+We trained a Random Forest model using the train() function from the caret package, leveraging its built-in support for cross-validation. The model's performance metrics, including accuracy, were averaged across the folds, providing an estimate of out-of-sample performance.
+
+The accuracy results for each fold are visualized in the plot below, showing the consistency of the model across the cross-validation iterations. This demonstrates stable performance, with minimal variation between folds, indicating a well-generalized model:
+
+```{r, echo=FALSE}
+# Set up cross-validation method (5-fold)
+train_control <- trainControl(method = "cv", number = 5)
+# Train a Random Forest model with cross-validation
+rf_model <- train(classe ~ ., data = train_set_cleaned, method = "rf", trControl = train_control)
+# Extract accuracy across folds
+accuracy <- rf_model$resample
+# Plot accuracy
+ggplot(accuracy, aes(Resample, Accuracy)) +
+  geom_point(color = "blue") +
+  geom_line(group = 1, color = "darkblue") +
+  theme_minimal() +
+  labs(title = "Cross-Validation Accuracy Across Folds",
+       x = "Fold", y = "Accuracy")
+```
+
+The line fluctuates only slightly between 0.992 and 0.996, indicating that the model's performance is stable across the folds. This small variation suggests good generalization, with no signs of overfitting or underfitting, and consistent accuracy throughout the cross-validation process.
+
+The variable importance plot provides valuable insights into which features contribute most to the Random Forest model's predictions. By using the varImp function, we extract the importance scores of each feature, which are then visualized in the plot. The top 10 most important features are displayed to highlight those that have the greatest impact on the model’s performance. This aggregated feature importance is calculated over the cross-validation folds, offering a more robust understanding of the relative significance of each variable. Identifying key features helps in interpreting the model and can guide further feature selection or engineering.
+
+```{r, echo=FALSE}
+var_imp <- varImp(rf_model)
+plot(var_imp, top = 10, main = "Aggregated Feature Importance Over CV")
+```
+## Validation Process and Results
+
+After training our Random Forest model, it's crucial to assess its performance on the validation set to ensure it generalizes well to new, unseen data. The model's accuracy on the validation set provides a robust measure of its effectiveness. Below, we present the accuracy of the model on the validation set, which will help us determine if the model can reliably predict the performance of barbell lifts.
+
+```{r, echo=FALSE}
+# Predict on the validation set
+predictions <- predict(rf_model, validation_set)
+validation_set$classe <- as.factor(validation_set$classe)
+# Confusion matrix and accuracy calculation
+conf_matrix <- confusionMatrix(predictions, validation_set$classe)
+
+# Extract the confusion matrix table
+conf_matrix_table <- conf_matrix$table
+
+# Melt the confusion matrix into long format
+conf_matrix_melt <- melt(conf_matrix_table)
+
+# Rename the columns for clarity
+colnames(conf_matrix_melt) <- c("Actual Class", "Predicted Class", "Frequency")
+
+# Plot confusion matrix as a heatmap
+ggplot(conf_matrix_melt, aes(x = `Predicted Class`, y = `Actual Class`, fill = Frequency)) +
+  geom_tile() +
+  geom_text(aes(label = Frequency), color = "white", size = 5) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  theme_minimal() +
+  labs(title = "Confusion Matrix Heatmap", x = "Predicted Class", y = "Actual Class") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5))
+
+```
+
+The confusion matrix above provides an insightful view into how well the model performs across different classes. The diagonal cells (A-A, B-B, C-C, D-D, E-E) show the number of correct predictions for each class, with high counts, indicating strong predictive accuracy. For example, class A has 1115 correct predictions, and class E has 713. Off-diagonal cells represent misclassifications, such as 5 instances where the model incorrectly predicted class A as class B. These misclassifications are relatively few, suggesting the model's general robustness. However, some classes, like C and D, have small misclassification counts (e.g., C predicted as D). The pattern of the matrix indicates that the model is performing well, but further refinement, such as addressing these few misclassifications, could further enhance its accuracy.
